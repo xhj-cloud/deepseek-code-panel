@@ -369,3 +369,10 @@ node --check client.js
 node --check index.js
 python3 -m py_compile server.py outline.py
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 [xhj-cloud](https://github.com/xhj-cloud)
+
+本项目基于 MIT 许可证开源，你可以自由使用、修改、分发，包括用于商业用途，只需保留原始版权声明。
+
