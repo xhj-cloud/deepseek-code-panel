@@ -372,7 +372,7 @@ python3 -m py_compile server.py outline.py
 
 ## License
 
-[MIT](LICENSE) © 2026 [xhj-cloud](https://github.com/xhj-cloud)
+[CC BY-NC 4.0](LICENSE) © 2026 [xhj-cloud](https://github.com/xhj-cloud)
 
-本项目基于 MIT 许可证开源，你可以自由使用、修改、分发，包括用于商业用途，只需保留原始版权声明。
+本项目采用 CC BY-NC 4.0（署名-非商业性使用）协议开源：可以自由查看、使用、修改和分发，但**禁止任何商业用途**。
 
