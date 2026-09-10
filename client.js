@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
       ".dsh-code-panel-half-bottom{flex:1 1 50%}",
       ".dsh-code-panel-section-label{padding:4px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dsw-alias-label-secondary);border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);flex:none}",
       ".dsh-code-panel-code{flex:1;overflow:auto;margin:0;padding:8px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre;tab-size:4;color:var(--dsw-alias-label-primary)}",
+      ".dsh-code-panel-image-wrap{flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:10px;background:var(--dsw-alias-bg-base)}",
+      ".dsh-code-panel-image{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.15)}",
       ".dsh-code-panel-structure{flex:1;overflow:auto;padding:6px 6px 12px}",
       ".dsh-code-panel-tree ul{list-style:none;margin:0;padding-left:14px}",
       ".dsh-code-panel-tree>ul{padding-left:2px}",
@@ -91,6 +93,16 @@ window.__ModuleLoader__.load({
       return String(n).padStart(Math.max(3, String(Math.max(1, n)).length), " ");
     }
 
+    function isImagePath(path) {
+      if (!path) return false;
+      var ext = path.toLowerCase().split(".").pop();
+      return ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "avif"].indexOf(ext) !== -1;
+    }
+
+    function imageUrl(root, path) {
+      return apiUrl("/api/image", { root: root, path: path });
+    }
+
     function buildFileTree(files) {
       var root = { name: "", path: "", type: "dir", children: [] };
       files.forEach(function (file) {
@@ -134,6 +146,8 @@ window.__ModuleLoader__.load({
       var expanded = _React$useState[0];
       var setExpanded = _React$useState[1];
 
+      var isImage = !isDir && node.language === "image";
+
       var caret = isDir
         ? React.createElement(
             "span",
@@ -174,7 +188,7 @@ window.__ModuleLoader__.load({
             style: isDir ? undefined : { cursor: "pointer" },
           },
           caret,
-          React.createElement("span", { className: "tree-icon" }, isDir ? "📁" : "📄"),
+          React.createElement("span", { className: "tree-icon" }, isDir ? "📁" : isImage ? "🖼️" : "📄"),
           React.createElement("span", { className: "tree-name" }, node.name),
           !isDir && React.createElement("span", { className: "line" }, node.language)
         ),
@@ -309,6 +323,12 @@ window.__ModuleLoader__.load({
           setView(null);
           return;
         }
+        if (isImagePath(selectedPath)) {
+          setView({ path: selectedPath, language: "image", content: "", structure: [] });
+          setViewLoading(false);
+          setViewError("");
+          return;
+        }
         setViewLoading(true);
         setViewError("");
         apiGet("/api/view", { root: root, path: selectedPath })
@@ -356,7 +376,8 @@ window.__ModuleLoader__.load({
         );
       }
 
-      var codeLines = view ? view.content.split("\n") : [];
+      var isImage = selectedPath !== "" && isImagePath(selectedPath);
+      var codeLines = view && !isImage ? view.content.split("\n") : [];
 
       return React.createElement(
         "div",
@@ -408,26 +429,37 @@ window.__ModuleLoader__.load({
           React.createElement(
             "div",
             { className: "dsh-code-panel-half dsh-code-panel-half-top" },
-            React.createElement("div", { className: "dsh-code-panel-section-label" }, "文件代码"),
+            React.createElement("div", { className: "dsh-code-panel-section-label" }, isImage ? "图片预览" : "文件代码"),
             selectedPath === ""
               ? React.createElement("div", { className: "dsh-code-panel-message" }, "未选择文件")
-              : viewLoading && !view
-                ? React.createElement("div", { className: "dsh-code-panel-message" }, "加载中…")
-                : viewError
-                  ? React.createElement("div", { className: "dsh-code-panel-message" }, viewError)
-                  : React.createElement(
-                      "pre",
-                      { className: "dsh-code-panel-code" },
-                      codeLines.map(function (line, i) {
-                        return React.createElement(
-                          "div",
-                          { key: i },
-                          React.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", userSelect: "none", display: "inline-block", width: "3em" } }, formatLineNumber(i)),
-                          " ",
-                          line || " "
-                        );
-                      })
-                    )
+              : isImage
+                ? React.createElement(
+                    "div",
+                    { className: "dsh-code-panel-image-wrap" },
+                    React.createElement("img", {
+                      className: "dsh-code-panel-image",
+                      src: imageUrl(root, selectedPath),
+                      alt: selectedPath,
+                      title: selectedPath,
+                    })
+                  )
+                : viewLoading && !view
+                  ? React.createElement("div", { className: "dsh-code-panel-message" }, "加载中…")
+                  : viewError
+                    ? React.createElement("div", { className: "dsh-code-panel-message" }, viewError)
+                    : React.createElement(
+                        "pre",
+                        { className: "dsh-code-panel-code" },
+                        codeLines.map(function (line, i) {
+                          return React.createElement(
+                            "div",
+                            { key: i },
+                            React.createElement("span", { style: { color: "var(--dsw-alias-label-tertiary)", userSelect: "none", display: "inline-block", width: "3em" } }, formatLineNumber(i)),
+                            " ",
+                            line || " "
+                          );
+                        })
+                      )
           ),
           React.createElement(
             "div",

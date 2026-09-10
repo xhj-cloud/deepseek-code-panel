@@ -6,10 +6,11 @@
 
 - 右侧浮动面板，可最小化/展开
 - 面板左侧边缘可**左右拖动调整宽度**（280px ~ 窗口宽度-32px）
-- 上半部分：当前选中文件的代码，带行号
+- 上半部分：当前选中文件的代码，带行号；如果选中的是图片，则切换为图片预览
 - 下半部分：当前工作区（dsh 当前会话 `cwd`）的**目录树**
-  - 文件夹可展开/折叠，带 `📁` / `📄` 图标
-  - 点击文件后在上半部分查看代码，并高亮当前文件
+  - 文件夹可展开/折叠，带 `📁` / `📄` / `🖼️` 图标
+  - 点击文件后在上半部分查看代码或预览图片，并高亮当前文件
+- 支持图片预览：png / jpg / jpeg / gif / webp / bmp / svg / ico / tif / tiff / avif
 - 未选择文件时，上半部分显示“未选择文件”（保持空白，不自动加载文件）
 
 ## 架构
@@ -71,7 +72,7 @@ Python 本地 HTTP 服务，只监听 `127.0.0.1`。基于标准库 `http.server
 | 函数 | 作用 |
 |---|---|
 | `safe_join(root, rel)` | 将相对路径安全解析到 `root` 内，防止路径穿越 |
-| `list_files(root, max_depth)` | 递归列出工作区文件，跳过 `.git`、`node_modules`、`venv`、`__pycache__` 等目录 |
+| `list_files(root, max_depth)` | 递归列出工作区文件，跳过 `.git`、`node_modules`、`venv`、`__pycache__` 等目录；图片单独放宽到 10MB |
 | `Handler` | HTTP 请求处理器，统一 JSON 响应与 CORS 头 |
 | `main()` | 解析 `--host` / `--port` 并启动服务 |
 
@@ -112,7 +113,8 @@ dsh 浏览器端插件。通过 `window.__ModuleLoader__.load()` 注册为 dsh �
 
 - 面板挂载在 `shell.overlay`（覆盖层本身 `pointer-events: none`，面板自己 `pointerEvents: auto`）
 - 目录树请求当前会话 `cwd` 对应的 `/api/tree`
-- 点击文件后请求 `/api/view`，上半部分渲染带行号的代码
+- 点击文本文件后请求 `/api/view`，上半部分渲染带行号的代码
+- 点击图片文件后使用 `/api/image`，上半部分直接渲染图片预览
 - 未选择文件时上半部分显示“未选择文件”
 
 ### `index.js`
@@ -225,7 +227,7 @@ pnpm install --force
 1. 启动 dsh web 后，右侧会出现代码面板。
 2. 上半部分默认显示“未选择文件”。
 3. 在下半部分目录树中展开文件夹，点击文件。
-4. 上半部分显示文件代码（带行号）。
+4. 上半部分显示文件代码（带行号）；如果点击的是图片文件，则显示图片预览。
 5. 鼠标按住面板左侧竖条左右拖动，可调整面板宽度。
 6. 点击右上角 `—` 最小化；点击右侧竖条恢复。
 7. 点击 `刷新` 重新加载当前工作区目录树。
@@ -269,9 +271,27 @@ pnpm install --force
 }
 ```
 
+### `GET /api/image?root=<workspace>&path=<relative-file>`
+
+读取图片文件并返回原始二进制内容，客户端用 `<img>` 直接预览。
+
+参数：
+
+| 参数 | 说明 |
+|---|---|
+| `root` | 工作区根目录绝对路径，必填 |
+| `path` | 相对于 `root` 的图片路径，必填 |
+
+响应：
+
+- `Content-Type`：根据扩展名推断，例如 `image/png`、`image/jpeg`、`image/svg+xml`
+- 响应体：图片原始字节
+- 文件超过 10MB 返回 `413`
+- 非图片文件返回 `415`
+
 ### `GET /api/view?root=<workspace>&path=<relative-file>`
 
-读取单个文件内容。
+读取单个文本文件内容。图片文件不会走这个接口，而是由 `/api/image` 返回。
 
 参数：
 
@@ -301,7 +321,8 @@ pnpm install --force
 - Python 服务只监听 `127.0.0.1`
 - `/api/view` 会校验相对路径，禁止逃逸出 workspace root
 - 默认跳过 `.git`、`node_modules`、`venv`、`__pycache__`、`dist`、`build` 等目录
-- 单文件读取上限 2MB，超过返回 413
+- 单文本文件读取上限 2MB，超过返回 413
+- 图片文件读取上限 10MB，超过返回 413
 
 ## 常见问题
 
@@ -360,6 +381,7 @@ cd ~/projects/deepseek-code-panel
 curl http://127.0.0.1:8765/api/health
 curl 'http://127.0.0.1:8765/api/tree?root=/Users/xianghaojing/projects'
 curl 'http://127.0.0.1:8765/api/view?root=/Users/xianghaojing/projects&path=deepseek-code-panel/server.py'
+curl -o /tmp/preview.png 'http://127.0.0.1:8765/api/image?root=/Users/xianghaojing/projects&path=deepseek-code-panel/demo.png'
 ```
 
 语法检查：

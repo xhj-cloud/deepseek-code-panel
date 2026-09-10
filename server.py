@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -35,6 +36,7 @@ EXCLUDED_DIRS = {
 }
 EXCLUDED_FILES = {".DS_Store", "Thumbs.db"}
 MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB，避免浏览器卡死
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 图片预览放宽到 10MB
 
 
 def safe_join(root: str, rel: str) -> str | None:
@@ -69,14 +71,16 @@ def list_files(root: str, max_depth: int = 4) -> list[dict[str, Any]]:
                     size = entry.stat().st_size
                 except OSError:
                     continue
-                if size > MAX_FILE_BYTES:
+                language = detect_language(str(entry))
+                limit = MAX_IMAGE_BYTES if language == "image" else MAX_FILE_BYTES
+                if size > limit:
                     continue
                 rel = entry.relative_to(root_path).as_posix()
                 files.append({
                     "path": rel,
                     "name": name,
                     "type": "file",
-                    "language": detect_language(str(entry)),
+                    "language": language,
                 })
 
     walk(root_path, 0)
@@ -164,6 +168,45 @@ class Handler(BaseHTTPRequestHandler):
                     "content": content,
                     "structure": structure,
                 })
+                return
+
+            if parsed.path == "/api/image":
+                root = (query.get("root") or [""])[0]
+                rel = (query.get("path") or [""])[0]
+                if not root or not os.path.isdir(root):
+                    self._send_json(400, {"error": "root must be an existing directory"})
+                    return
+                if not rel:
+                    self._send_json(400, {"error": "path is required"})
+                    return
+                target = safe_join(root, rel)
+                if target is None:
+                    self._send_json(403, {"error": "path escapes workspace root"})
+                    return
+                if not os.path.isfile(target):
+                    self._send_json(404, {"error": "file not found"})
+                    return
+                if detect_language(target) != "image":
+                    self._send_json(415, {"error": "not an image file"})
+                    return
+                try:
+                    stat = os.stat(target)
+                    if stat.st_size > MAX_IMAGE_BYTES:
+                        self._send_json(413, {"error": "image too large"})
+                        return
+                    with open(target, "rb") as f:
+                        body = f.read()
+                except OSError as e:
+                    self._send_json(500, {"error": str(e)})
+                    return
+                mime, _ = mimetypes.guess_type(target)
+                self.send_response(200)
+                self.send_header("Content-Type", mime or "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
                 return
 
             self._send_json(404, {"error": "not found"})

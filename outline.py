@@ -54,6 +54,18 @@ def detect_language(path: str) -> str:
         ".swift": "swift",
         ".kt": "kotlin",
         ".kts": "kotlin",
+        # 图片文件：客户端会切换到图片预览模式
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".gif": "image",
+        ".webp": "image",
+        ".bmp": "image",
+        ".svg": "image",
+        ".ico": "image",
+        ".tif": "image",
+        ".tiff": "image",
+        ".avif": "image",
     }
     return mapping.get(ext, "text")
 
