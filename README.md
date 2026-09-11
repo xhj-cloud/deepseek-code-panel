@@ -7,10 +7,13 @@
 - 右侧浮动面板，可最小化/展开
 - 面板左侧边缘可**左右拖动调整宽度**（280px ~ 窗口宽度-32px）
 - 上半部分：当前选中文件的代码，带行号；如果选中的是图片，则切换为图片预览
-- 下半部分：当前工作区（dsh 当前会话 `cwd`）的**目录树**
-  - 文件夹可展开/折叠，带 `📁` / `📄` / `🖼️` 图标
-  - 点击文件后在上半部分查看代码或预览图片，并高亮当前文件
+- 下半部分：当前工作区（dsh 当前会话 `cwd`）的**目录树（懒加载）**
+  - 文件夹**默认折叠**，点击展开时才请求该目录的一层子项，**无深度限制**
+  - 带 `📁` / `📄` / `🖼️` 图标，点击文件后在上半部分查看代码或预览图片，并高亮当前文件
 - 支持图片预览：png / jpg / jpeg / gif / webp / bmp / svg / ico / tif / tiff / avif
+  - 图片上限 100MB，服务端**分块流式传输**，手机原图（10~25MB）可直接预览
+  - 图片加载失败（超大/损坏/格式不支持）时显示明确提示
+- 顶部下拉框提供全量文件快速跳转（扫描深度上限 8）
 - 未选择文件时，上半部分显示“未选择文件”（保持空白，不自动加载文件）
 
 ## 架构
@@ -25,8 +28,10 @@ dsh 的插件宿主是 **Node.js / Cordis**，浏览器端 UI 也由 JavaScript 
 │      │  HTTP fetch                                           │
 │      ▼                                                       │
 │  Python server.py  (127.0.0.1:8765)                          │
-│      ├── /api/tree   目录树                                  │
+│      ├── /api/list   单层子项（目录树懒加载）                │
+│      ├── /api/tree   全量扁平列表（下拉框用）                │
 │      ├── /api/view   文件内容                                │
+│      ├── /api/image  图片（流式，≤100MB）                    │
 │      └── outline.py  文件结构解析（备用/可扩展）             │
 │                                                              │
 │ dsh host (Node.js)                                           │
@@ -72,8 +77,9 @@ Python 本地 HTTP 服务，只监听 `127.0.0.1`。基于标准库 `http.server
 | 函数 | 作用 |
 |---|---|
 | `safe_join(root, rel)` | 将相对路径安全解析到 `root` 内，防止路径穿越 |
-| `list_files(root, max_depth)` | 递归列出工作区文件，跳过 `.git`、`node_modules`、`venv`、`__pycache__` 等目录；图片单独放宽到 10MB |
-| `Handler` | HTTP 请求处理器，统一 JSON 响应与 CORS 头 |
+| `list_files(root, max_depth)` | 递归列出工作区文件（扁平列表，下拉框用），跳过 `.git`、`node_modules`、`venv`、`__pycache__` 等目录；图片单独放宽到 100MB |
+| `list_children(root, rel)` | 列出某目录下**一层**子项（目录在前），供目录树懒加载使用，无深度限制 |
+| `Handler` | HTTP 请求处理器，统一 JSON 响应与 CORS 头；`/api/image` 分块流式传输 |
 | `main()` | 解析 `--host` / `--port` 并启动服务 |
 
 命令行：
@@ -103,18 +109,19 @@ dsh 浏览器端插件。通过 `window.__ModuleLoader__.load()` 注册为 dsh �
 | 部分 | 说明 |
 |---|---|
 | `CodePanel` | 主面板组件，管理文件列表、选中文件、加载状态、宽度拖拽 |
-| `FileTree` | 目录树容器，把扁平文件列表构造成树 |
-| `FileTreeNode` | 目录树节点，支持展开/折叠与选中高亮 |
-| `buildFileTree(files)` | 将 `/api/tree` 返回的扁平列表构造成嵌套目录树 |
+| `FileTree` | 目录树容器，渲染顶层目录项 |
+| `FileTreeNode` | 目录树节点，**懒加载**：展开时请求 `/api/list` 获取一层子项，支持折叠/选中高亮/加载与失败状态 |
+| `listCache` | 模块级子项缓存，展开过的目录不重复请求；刷新/切换工作区时清空 |
 | `onResizeStart / Move / End` | 面板宽度拖拽逻辑，监听 `window` 上的 pointer 事件 |
 | CSS | 内嵌样式，包含面板、拖拽条、目录树、代码区等样式 |
 
 关键行为：
 
 - 面板挂载在 `shell.overlay`（覆盖层本身 `pointer-events: none`，面板自己 `pointerEvents: auto`）
-- 目录树请求当前会话 `cwd` 对应的 `/api/tree`
+- 目录树顶层请求当前会话 `cwd` 对应的 `/api/list`（仅一层）；文件夹**默认折叠**，展开时才请求子项，可无限深入
+- 顶部下拉框使用 `/api/tree`（`max_depth=8`）的全量扁平列表快速跳转
 - 点击文本文件后请求 `/api/view`，上半部分渲染带行号的代码
-- 点击图片文件后使用 `/api/image`，上半部分直接渲染图片预览
+- 点击图片文件后使用 `/api/image`，上半部分直接渲染图片预览；`<img>` 加载失败时显示错误提示
 - 未选择文件时上半部分显示“未选择文件”
 
 ### `index.js`
@@ -244,16 +251,42 @@ pnpm install --force
 { "ok": true }
 ```
 
-### `GET /api/tree?root=<workspace>&max_depth=5`
+### `GET /api/list?root=<workspace>[&path=<relative-dir>]`
 
-列出工作区目录下的文件（扁平列表）。
+列出目录下**一层**子项（目录在前，按名称排序），供目录树懒加载使用，无深度限制。`path` 省略时列出 `root` 顶层。
 
 参数：
 
 | 参数 | 说明 |
 |---|---|
 | `root` | 工作区根目录的绝对路径，必填 |
-| `max_depth` | 最大扫描层数，默认 4 |
+| `path` | 相对于 `root` 的目录路径，可选 |
+
+响应：
+
+```json
+{
+  "root": "/Users/xianghaojing/Desktop",
+  "path": "作品",
+  "entries": [
+    { "name": "IMG_0160.JPG", "path": "作品/IMG_0160.JPG", "type": "file", "language": "image" },
+    { "name": "子目录", "path": "作品/子目录", "type": "dir" }
+  ]
+}
+```
+
+目录不存在返回 `404`，路径越界同样按不存在处理。
+
+### `GET /api/tree?root=<workspace>&max_depth=8`
+
+递归列出工作区文件（扁平列表），供顶部下拉框快速跳转使用。
+
+参数：
+
+| 参数 | 说明 |
+|---|---|
+| `root` | 工作区根目录的绝对路径，必填 |
+| `max_depth` | 最大扫描层数，默认 4（客户端下拉框传 8） |
 
 响应：
 
@@ -273,7 +306,7 @@ pnpm install --force
 
 ### `GET /api/image?root=<workspace>&path=<relative-file>`
 
-读取图片文件并返回原始二进制内容，客户端用 `<img>` 直接预览。
+读取图片文件并**分块流式**返回原始二进制内容，客户端用 `<img>` 直接预览。
 
 参数：
 
@@ -285,8 +318,8 @@ pnpm install --force
 响应：
 
 - `Content-Type`：根据扩展名推断，例如 `image/png`、`image/jpeg`、`image/svg+xml`
-- 响应体：图片原始字节
-- 文件超过 10MB 返回 `413`
+- 响应体：图片原始字节（64KB 分块流式传输，内存占用恒定）
+- 文件超过 100MB 返回 `413`
 - 非图片文件返回 `415`
 
 ### `GET /api/view?root=<workspace>&path=<relative-file>`
@@ -322,7 +355,8 @@ pnpm install --force
 - `/api/view` 会校验相对路径，禁止逃逸出 workspace root
 - 默认跳过 `.git`、`node_modules`、`venv`、`__pycache__`、`dist`、`build` 等目录
 - 单文本文件读取上限 2MB，超过返回 413
-- 图片文件读取上限 10MB，超过返回 413
+- 图片文件读取上限 100MB，超过返回 413（流式传输，服务端内存占用不随图片大小增长）
+- `/api/list`、`/api/image` 均经过 `safe_join` 路径校验，禁止逃逸出 workspace root
 
 ## 常见问题
 
@@ -332,6 +366,12 @@ pnpm install --force
 - 确认 `~/.dsh/profiles/web/cordis.patch.yml` 中存在 `code-panel` 条目
 - 重启 `dsh web`
 - 查看 dsh 终端是否有 `[code-panel]` 相关日志
+
+### 有的图片打不开？
+
+- 超过 100MB 的图片返回 `413`（面板会显示“图片加载失败”提示）
+- 文件扩展名是图片但内容已损坏，或格式浏览器不支持（如 HEIC 伪装成 .png），也会显示失败提示
+- 目录树里**看不到**的图片：确认不在 `.git`、`node_modules`、`venv`、`dist`、`build` 等排除目录中；懒加载树下可无限深入，不再受深度限制
 
 ### 面板出现但目录树为空？
 
@@ -379,7 +419,9 @@ cd ~/projects/deepseek-code-panel
 
 ```bash
 curl http://127.0.0.1:8765/api/health
-curl 'http://127.0.0.1:8765/api/tree?root=/Users/xianghaojing/projects'
+curl 'http://127.0.0.1:8765/api/list?root=/Users/xianghaojing/projects'
+curl 'http://127.0.0.1:8765/api/list?root=/Users/xianghaojing/projects&path=deepseek-code-panel'
+curl 'http://127.0.0.1:8765/api/tree?root=/Users/xianghaojing/projects&max_depth=8'
 curl 'http://127.0.0.1:8765/api/view?root=/Users/xianghaojing/projects&path=deepseek-code-panel/server.py'
 curl -o /tmp/preview.png 'http://127.0.0.1:8765/api/image?root=/Users/xianghaojing/projects&path=deepseek-code-panel/demo.png'
 ```

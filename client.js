@@ -2,7 +2,7 @@
  * DeepSeek Harness 代码面板 - 浏览器端插件
  *
  * 注册到 dsh 的 shell.overlay（frame 级浮动层），在右侧显示一个可折叠面板。
- * 面板上半部分显示文件代码，下半部分显示该文件的结构（outline）。
+ * 面板上半部分显示文件代码或图片预览，下半部分显示当前工作区的目录树（懒加载）。
  * 数据来自同机 Python 服务：http://127.0.0.1:8765
  */
 window.__ModuleLoader__.load({
@@ -50,6 +50,9 @@ window.__ModuleLoader__.load({
       ".dsh-code-panel-tree .kind{color:var(--dsw-alias-state-business-primary,#4176e6);flex:none;font-size:11px;min-width:52px}",
       ".dsh-code-panel-tree .tree-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}",
       ".dsh-code-panel-tree .line{color:var(--dsw-alias-label-tertiary);flex:none;margin-left:8px;font-size:11px}",
+      ".dsh-code-panel-tree .tree-loading{padding:1px 6px 1px 24px;font-size:11px;color:var(--dsw-alias-label-secondary,#999)}",
+      ".dsh-code-panel-tree .tree-loading.tree-error{color:#e5484d}",
+      ".dsh-code-panel-tree .tree-loading.tree-empty{color:var(--dsw-alias-label-tertiary,#777)}",
       ".dsh-code-panel-message{display:flex;align-items:center;justify-content:center;flex:1;color:var(--dsw-alias-label-secondary,#999);padding:16px;text-align:center}",
       ".dsh-code-panel-minimized{position:fixed;top:50%;right:0;transform:translateY(-50%);z-index:2147483000;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-right:none;border-radius:10px 0 0 10px;padding:10px 6px;cursor:pointer;writing-mode:vertical-rl;font-size:13px;color:var(--dsw-alias-label-primary);box-shadow:-4px 0 16px rgba(0,0,0,.2)}",
       "@media (max-width:640px){.dsh-code-panel-root{top:8px;right:8px;left:8px;bottom:8px;width:auto;max-width:none}.dsh-code-panel-resizer{display:none}}"
@@ -103,50 +106,62 @@ window.__ModuleLoader__.load({
       return apiUrl("/api/image", { root: root, path: path });
     }
 
-    function buildFileTree(files) {
-      var root = { name: "", path: "", type: "dir", children: [] };
-      files.forEach(function (file) {
-        var parts = file.path.split("/");
-        var node = root;
-        for (var i = 0; i < parts.length - 1; i++) {
-          var part = parts[i];
-          var child = null;
-          for (var j = 0; j < node.children.length; j++) {
-            if (node.children[j].type === "dir" && node.children[j].name === part) {
-              child = node.children[j];
-              break;
-            }
-          }
-          if (!child) {
-            child = { name: part, path: parts.slice(0, i + 1).join("/"), type: "dir", children: [] };
-            node.children.push(child);
-          }
-          node = child;
-        }
-        node.children.push({ name: parts[parts.length - 1], path: file.path, type: "file", language: file.language });
-      });
+    // ── 目录树懒加载 ─────────────────────────────────────
+    // 子项缓存：目录 path -> entries 数组（展开过就不再重复请求）
+    var listCache = {};
 
-      function sortNodes(nodes) {
-        nodes.sort(function (a, b) {
-          if (a.type === b.type) return a.name.localeCompare(b.name);
-          return a.type === "dir" ? -1 : 1;
-        });
-        nodes.forEach(function (n) {
-          if (n.children) sortNodes(n.children);
-        });
-      }
-      sortNodes(root.children);
-      return root.children;
+    function clearListCache() {
+      listCache = {};
     }
 
-    function FileTreeNode({ node, selectedPath, onSelect }) {
+    function FileTreeNode(props) {
+      var node = props.node;
+      var root = props.root;
+      var selectedPath = props.selectedPath;
+      var onSelect = props.onSelect;
       var isDir = node.type === "dir";
       var isSelected = !isDir && node.path === selectedPath;
-      var _React$useState = React.useState(true);
+      var isImage = !isDir && node.language === "image";
+
+      var _React$useState = React.useState(false);
       var expanded = _React$useState[0];
       var setExpanded = _React$useState[1];
+      var _React$useState2 = React.useState(function () {
+        return listCache[node.path] !== undefined ? listCache[node.path] : null;
+      });
+      var children = _React$useState2[0];
+      var setChildren = _React$useState2[1];
+      var _React$useState3 = React.useState(false);
+      var loading = _React$useState3[0];
+      var setLoading = _React$useState3[1];
+      var _React$useState4 = React.useState("");
+      var error = _React$useState4[0];
+      var setError = _React$useState4[1];
 
-      var isImage = !isDir && node.language === "image";
+      // 懒加载：首次展开时请求该目录的一层子项
+      React.useEffect(function () {
+        if (!isDir || !expanded || children !== null) return;
+        var cancelled = false;
+        setLoading(true);
+        setError("");
+        apiGet("/api/list", { root: root, path: node.path })
+          .then(function (data) {
+            if (cancelled) return;
+            listCache[node.path] = data.entries || [];
+            setChildren(listCache[node.path]);
+          })
+          .catch(function (e) {
+            if (cancelled) return;
+            setError("加载子目录失败: " + e.message);
+          })
+          .finally(function () {
+            if (!cancelled) setLoading(false);
+          });
+        return function () {
+          cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [expanded]);
 
       var caret = isDir
         ? React.createElement(
@@ -162,55 +177,71 @@ window.__ModuleLoader__.load({
           )
         : React.createElement("span", { className: "tree-caret-placeholder" }, "");
 
-      var children = isDir && expanded
-        ? React.createElement(
+      var subtree = null;
+      if (isDir && expanded) {
+        if (children === null && loading) {
+          subtree = React.createElement("div", { className: "tree-loading" }, "加载中…");
+        } else if (children === null && error) {
+          subtree = React.createElement("div", { className: "tree-loading tree-error" }, error);
+        } else if (children && children.length === 0) {
+          subtree = React.createElement("div", { className: "tree-loading tree-empty" }, "（空目录）");
+        } else if (children && children.length > 0) {
+          subtree = React.createElement(
             "ul",
             null,
-            node.children.map(function (child, childIdx) {
+            children.map(function (child, childIdx) {
               return React.createElement(FileTreeNode, {
                 key: child.path || child.name + "-" + childIdx,
                 node: child,
+                root: root,
                 selectedPath: selectedPath,
                 onSelect: onSelect,
               });
             })
-          )
-        : null;
+          );
+        }
+      }
 
       return React.createElement(
         "li",
-        { key: node.path || node.name, title: isDir ? node.path || node.name : node.path },
+        { key: node.path || node.name, title: node.path || node.name },
         React.createElement(
           "div",
           {
             className: "tree-row" + (isSelected ? " selected" : ""),
-            onClick: isDir ? undefined : function () { onSelect(node.path); },
-            style: isDir ? undefined : { cursor: "pointer" },
+            onClick: function () {
+              if (isDir) {
+                setExpanded(!expanded);
+              } else {
+                onSelect(node.path);
+              }
+            },
+            style: { cursor: "pointer" },
           },
           caret,
           React.createElement("span", { className: "tree-icon" }, isDir ? "📁" : isImage ? "🖼️" : "📄"),
           React.createElement("span", { className: "tree-name" }, node.name),
           !isDir && React.createElement("span", { className: "line" }, node.language)
         ),
-        children
+        subtree
       );
     }
 
-    function FileTree({ files, selectedPath, onSelect }) {
-      if (!files || files.length === 0) {
+    function FileTree({ entries, root, selectedPath, onSelect }) {
+      if (!entries || entries.length === 0) {
         return React.createElement("div", { className: "dsh-code-panel-message" }, "当前工作区没有可显示的文件");
       }
-      var tree = buildFileTree(files);
       return React.createElement(
         "div",
         { className: "dsh-code-panel-tree" },
         React.createElement(
           "ul",
           null,
-          tree.map(function (node, idx) {
+          entries.map(function (node, idx) {
             return React.createElement(FileTreeNode, {
               key: node.path || node.name + "-" + idx,
               node: node,
+              root: root,
               selectedPath: selectedPath,
               onSelect: onSelect,
             });
@@ -234,8 +265,11 @@ window.__ModuleLoader__.load({
       var root = _React$useState2[0];
       var setRoot = _React$useState2[1];
       var _React$useState3 = React.useState([]);
-      var files = _React$useState3[0];
+      var files = _React$useState3[0]; // 全量扁平列表（下拉框用）
       var setFiles = _React$useState3[1];
+      var _React$useState3b = React.useState([]);
+      var topEntries = _React$useState3b[0]; // 顶层目录一层子项（目录树懒加载入口）
+      var setTopEntries = _React$useState3b[1];
       var _React$useState4 = React.useState("");
       var selectedPath = _React$useState4[0];
       var setSelectedPath = _React$useState4[1];
@@ -254,6 +288,12 @@ window.__ModuleLoader__.load({
       var _React$useState9 = React.useState("");
       var viewError = _React$useState9[0];
       var setViewError = _React$useState9[1];
+      var _React$useState9b = React.useState("");
+      var imageError = _React$useState9b[0];
+      var setImageError = _React$useState9b[1];
+      var _React$useState9c = React.useState(0);
+      var treeVersion = _React$useState9c[0]; // 刷新/切目录时递增，强制目录树重新挂载
+      var setTreeVersion = _React$useState9c[1];
       var _React$useState10 = React.useState(440);
       var width = _React$useState10[0];
       var setWidth = _React$useState10[1];
@@ -284,12 +324,15 @@ window.__ModuleLoader__.load({
         window.addEventListener("pointercancel", onResizeEndWindow);
       }
 
-      // 当当前会话 cwd 变化时，拉取目录树
+      // 当当前会话 cwd 变化时，拉取目录树（懒加载顶层）+ 下拉框文件列表
       React.useEffect(function () {
         var cancelled = false;
+        clearListCache();
+        setTreeVersion(function (v) { return v + 1; });
         if (!cwd) {
           setRoot("");
           setFiles([]);
+          setTopEntries([]);
           setSelectedPath("");
           setView(null);
           return;
@@ -299,10 +342,12 @@ window.__ModuleLoader__.load({
         setTreeError("");
         setSelectedPath("");
         setView(null);
-        apiGet("/api/tree", { root: cwd, max_depth: 5 })
+        setImageError("");
+        // 目录树顶层（懒加载入口，无深度限制）
+        apiGet("/api/list", { root: cwd })
           .then(function (data) {
             if (cancelled) return;
-            setFiles(data.files || []);
+            setTopEntries(data.entries || []);
           })
           .catch(function (e) {
             if (cancelled) return;
@@ -310,6 +355,14 @@ window.__ModuleLoader__.load({
           })
           .finally(function () {
             if (!cancelled) setTreeLoading(false);
+          });
+        // 全量文件列表（顶部下拉框用，深度上限 8）
+        apiGet("/api/tree", { root: cwd, max_depth: 8 })
+          .then(function (data) {
+            if (!cancelled) setFiles(data.files || []);
+          })
+          .catch(function () {
+            // 下拉框不可用不影响目录树主功能
           });
         return function () {
           cancelled = true;
@@ -327,10 +380,12 @@ window.__ModuleLoader__.load({
           setView({ path: selectedPath, language: "image", content: "", structure: [] });
           setViewLoading(false);
           setViewError("");
+          setImageError("");
           return;
         }
         setViewLoading(true);
         setViewError("");
+        setImageError("");
         apiGet("/api/view", { root: root, path: selectedPath })
           .then(function (data) {
             if (cancelled) return;
@@ -350,11 +405,13 @@ window.__ModuleLoader__.load({
 
       function handleRefresh() {
         if (!root) return;
+        clearListCache();
+        setTreeVersion(function (v) { return v + 1; });
         setTreeLoading(true);
         setTreeError("");
-        apiGet("/api/tree", { root: root, max_depth: 5 })
+        apiGet("/api/list", { root: root })
           .then(function (data) {
-            setFiles(data.files || []);
+            setTopEntries(data.entries || []);
           })
           .catch(function (e) {
             setTreeError("刷新失败: " + e.message);
@@ -362,6 +419,11 @@ window.__ModuleLoader__.load({
           .finally(function () {
             setTreeLoading(false);
           });
+        apiGet("/api/tree", { root: root, max_depth: 8 })
+          .then(function (data) {
+            setFiles(data.files || []);
+          })
+          .catch(function () {});
       }
 
       if (minimized) {
@@ -433,16 +495,22 @@ window.__ModuleLoader__.load({
             selectedPath === ""
               ? React.createElement("div", { className: "dsh-code-panel-message" }, "未选择文件")
               : isImage
-                ? React.createElement(
-                    "div",
-                    { className: "dsh-code-panel-image-wrap" },
-                    React.createElement("img", {
-                      className: "dsh-code-panel-image",
-                      src: imageUrl(root, selectedPath),
-                      alt: selectedPath,
-                      title: selectedPath,
-                    })
-                  )
+                ? imageError
+                  ? React.createElement("div", { className: "dsh-code-panel-message" }, imageError)
+                  : React.createElement(
+                      "div",
+                      { className: "dsh-code-panel-image-wrap" },
+                      React.createElement("img", {
+                        key: selectedPath,
+                        className: "dsh-code-panel-image",
+                        src: imageUrl(root, selectedPath),
+                        alt: selectedPath,
+                        title: selectedPath,
+                        onError: function () {
+                          setImageError("图片加载失败：文件可能超过 100MB、已损坏或格式不受浏览器支持");
+                        },
+                      })
+                    )
                 : viewLoading && !view
                   ? React.createElement("div", { className: "dsh-code-panel-message" }, "加载中…")
                   : viewError
@@ -465,14 +533,20 @@ window.__ModuleLoader__.load({
             "div",
             { className: "dsh-code-panel-half dsh-code-panel-half-bottom" },
             React.createElement("div", { className: "dsh-code-panel-section-label" }, "目录树"),
-            treeLoading && files.length === 0
+            treeLoading && topEntries.length === 0
               ? React.createElement("div", { className: "dsh-code-panel-message" }, "加载中…")
               : treeError
                 ? React.createElement("div", { className: "dsh-code-panel-message" }, treeError)
                 : React.createElement(
                     "div",
                     { className: "dsh-code-panel-structure" },
-                    React.createElement(FileTree, { files: files, selectedPath: selectedPath, onSelect: setSelectedPath })
+                    React.createElement(FileTree, {
+                      key: treeVersion,
+                      entries: topEntries,
+                      root: root,
+                      selectedPath: selectedPath,
+                      onSelect: setSelectedPath,
+                    })
                   )
           )
         )

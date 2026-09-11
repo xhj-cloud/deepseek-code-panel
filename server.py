@@ -6,10 +6,12 @@
 用法:
     python server.py [--port 8765] [--host 127.0.0.1]
 
-该服务仅监听本机回环地址，提供两个 JSON API:
+该服务仅监听本机回环地址，提供以下 API:
     GET /api/health
-    GET /api/tree?root=<workspace>
+    GET /api/tree?root=<workspace>[&max_depth=N]   全量文件扁平列表（下拉框用）
+    GET /api/list?root=<workspace>[&path=<rel-dir>]  单层子项列表（目录树懒加载用）
     GET /api/view?root=<workspace>&path=<relative-file-path>
+    GET /api/image?root=<workspace>&path=<relative-image>  图片流式传输
 """
 
 from __future__ import annotations
@@ -36,7 +38,8 @@ EXCLUDED_DIRS = {
 }
 EXCLUDED_FILES = {".DS_Store", "Thumbs.db"}
 MAX_FILE_BYTES = 2 * 1024 * 1024  # 2MB，避免浏览器卡死
-MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 图片预览放宽到 10MB
+MAX_IMAGE_BYTES = 100 * 1024 * 1024  # 图片预览放宽到 100MB（流式传输，内存占用低）
+STREAM_CHUNK = 64 * 1024  # 图片流式传输块大小
 
 
 def safe_join(root: str, rel: str) -> str | None:
@@ -87,6 +90,51 @@ def list_files(root: str, max_depth: int = 4) -> list[dict[str, Any]]:
     return files
 
 
+def list_children(root: str, rel: str) -> list[dict[str, Any]] | None:
+    """列出 root/rel 目录下的一层子项（目录在前，名称不区分大小写排序）。
+
+    用于目录树懒加载。越界或目录不存在时返回 None。
+    """
+    target = safe_join(root, rel) if rel else safe_join(root, "")
+    if target is None or not os.path.isdir(target):
+        return None
+    root_real = os.path.realpath(root)
+    entries: list[dict[str, Any]] = []
+    try:
+        it = sorted(os.scandir(target), key=lambda e: (e.is_file(), e.name.lower()))
+    except OSError:
+        return None
+    for entry in it:
+        name = entry.name
+        if name in EXCLUDED_DIRS or name in EXCLUDED_FILES:
+            continue
+        try:
+            if entry.is_dir():
+                entries.append({
+                    "name": name,
+                    "path": os.path.relpath(entry.path, root_real).replace(os.sep, "/"),
+                    "type": "dir",
+                })
+            elif entry.is_file():
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    continue
+                language = detect_language(entry.path)
+                limit = MAX_IMAGE_BYTES if language == "image" else MAX_FILE_BYTES
+                if size > limit:
+                    continue
+                entries.append({
+                    "name": name,
+                    "path": os.path.relpath(entry.path, root_real).replace(os.sep, "/"),
+                    "type": "file",
+                    "language": language,
+                })
+        except OSError:
+            continue
+    return entries
+
+
 # ──────────────────────────────────────────────
 # HTTP 服务
 # ──────────────────────────────────────────────
@@ -131,6 +179,19 @@ class Handler(BaseHTTPRequestHandler):
                 max_depth = int((query.get("max_depth") or ["4"])[0])
                 files = list_files(root, max_depth=max_depth)
                 self._send_json(200, {"root": root, "files": files})
+                return
+
+            if parsed.path == "/api/list":
+                root = (query.get("root") or [""])[0]
+                rel = (query.get("path") or [""])[0]
+                if not root or not os.path.isdir(root):
+                    self._send_json(400, {"error": "root must be an existing directory"})
+                    return
+                entries = list_children(root, rel)
+                if entries is None:
+                    self._send_json(404, {"error": "directory not found"})
+                    return
+                self._send_json(200, {"root": root, "path": rel, "entries": entries})
                 return
 
             if parsed.path == "/api/view":
@@ -191,22 +252,30 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 try:
                     stat = os.stat(target)
-                    if stat.st_size > MAX_IMAGE_BYTES:
-                        self._send_json(413, {"error": "image too large"})
-                        return
-                    with open(target, "rb") as f:
-                        body = f.read()
                 except OSError as e:
                     self._send_json(500, {"error": str(e)})
+                    return
+                if stat.st_size > MAX_IMAGE_BYTES:
+                    self._send_json(413, {"error": "image too large"})
                     return
                 mime, _ = mimetypes.guess_type(target)
                 self.send_response(200)
                 self.send_header("Content-Type", mime or "application/octet-stream")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(stat.st_size))
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    # 分块流式传输，避免大图片全部读入内存
+                    with open(target, "rb") as f:
+                        while True:
+                            chunk = f.read(STREAM_CHUNK)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    # 浏览器取消下载（快速切换图片时常见），忽略
+                    pass
                 return
 
             self._send_json(404, {"error": "not found"})

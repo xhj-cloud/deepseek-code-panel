@@ -1,7 +1,7 @@
 {
   "name": "deepseek-code-panel",
-  "version": "0.2.0",
-  "license": "MIT",
+  "version": "0.3.0",
+  "license": "CC-BY-NC-4.0",
   "description": "DeepSeek Harness 右侧代码面板：上半文件代码，下半目录树（Python 本地服务 + dsh 客户端插件）",
   "type": "commonjs",
   "main": "index.js",
