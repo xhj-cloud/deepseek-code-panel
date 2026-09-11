@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self._send_json(200, {"ok": True})
+                self._send_json(200, {"ok": True, "service": "deepseek-code-panel", "pid": os.getpid()})
                 return
 
             if parsed.path == "/api/tree":
@@ -283,13 +283,55 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
 
+def _kill_stale_server(host: str, port: int, timeout: float = 5.0) -> bool:
+    """端口被占用时，若占用者是本服务的旧实例（health 返回自身 pid），
+    向其发送 SIGTERM 并等待端口释放。返回端口是否已释放。"""
+    import signal
+    import socket
+    import time
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/health", timeout=2) as r:
+            data = json.load(r)
+    except Exception:
+        return False
+    if not isinstance(data, dict) or data.get("service") != "deepseek-code-panel" or not data.get("pid"):
+        return False
+    try:
+        os.kill(int(data["pid"]), signal.SIGTERM)
+        print(f"[code-panel] sent SIGTERM to stale server pid={data['pid']}", flush=True)
+    except (ProcessLookupError, PermissionError, ValueError):
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                pass  # 旧实例仍在监听，继续等待
+        except OSError:
+            return True  # 连接被拒绝，端口已释放
+        time.sleep(0.2)
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="DeepSeek Harness code panel local server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError:
+        print(f"[code-panel] port {args.port} in use; trying to stop a stale code-panel server ...", flush=True)
+        if not _kill_stale_server(args.host, args.port):
+            print(f"[code-panel] error: port {args.port} is in use by another process", flush=True)
+            sys.exit(1)
+        try:
+            httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+        except OSError as e:
+            print(f"[code-panel] error: cannot bind port {args.port}: {e}", flush=True)
+            sys.exit(1)
     print(f"[code-panel] listening on http://{args.host}:{args.port}", flush=True)
     try:
         httpd.serve_forever()
