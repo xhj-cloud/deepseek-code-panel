@@ -229,6 +229,14 @@ pnpm install --force
 
 5. 重启 `dsh web`。
 
+## 版本兼容
+
+插件已在 dsh rc2 与 rc6 的差异上做了兼容：
+
+- **rc6**：`SessionListState` 带有 `current`，插件直接通过 `useSessions(s => s.current)` 获取当前会话。
+- **rc2**：当前会话选择不在 `useSessions` 中，而是在 `ctx.sidebarRight.mounted` 上。插件会优先读取该来源，并回退到第一个非空会话。
+- 如果两者都不可用，面板会显示“当前工作区没有可显示的文件”，而不是错误地读取空工作区。
+
 ## 使用说明
 
 1. 启动 dsh web 后，右侧会出现代码面板。

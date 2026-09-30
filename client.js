@@ -253,9 +253,39 @@ window.__ModuleLoader__.load({
     // ── 面板组件 ─────────────────────────────────────────
     function CodePanel(props) {
       var useSessions = props.useSessions;
-      var current = useSessions(function (s) { return s.current; });
+      var sidebarRight = props.getSidebarRight ? props.getSidebarRight() : props.sidebarRight;
+
+      // rc6 / 旧版：SessionListState 直接带 current。
+      var legacyCurrent = useSessions(function (s) { return s.current; });
+
+      // rc2：当前会话选择在 ctx.sidebarRight.mounted 上，不在 useSessions 里。
+      var subscribeMounted = React.useCallback(function (onChange) {
+        if (!sidebarRight || !sidebarRight.mounted) return function () {};
+        return sidebarRight.mounted.subscribe(onChange);
+      }, [sidebarRight]);
+      var getMounted = React.useCallback(function () {
+        if (!sidebarRight || !sidebarRight.mounted) return undefined;
+        return sidebarRight.mounted.getSnapshot();
+      }, [sidebarRight]);
+      var mountedCurrent = React.useSyncExternalStore(subscribeMounted, getMounted);
+
+      // 兼底：既没有 current，也没有 mounted 时，选第一个非空会话。
+      var fallbackCurrent = useSessions(function (s) {
+        if (!s.ids || s.ids.length === 0) return undefined;
+        var hit = s.ids.find(function (id) {
+          return s.byId[id] && s.byId[id].blank === false;
+        });
+        return hit || s.ids[0];
+      });
+
+      var current = legacyCurrent !== undefined
+        ? legacyCurrent
+        : mountedCurrent !== undefined
+          ? mountedCurrent
+          : fallbackCurrent;
+
       var cwd = useSessions(function (s) {
-        return s.current ? s.byId[s.current] && s.byId[s.current].cwd : undefined;
+        return current ? s.byId[current] && s.byId[current].cwd : undefined;
       });
 
       var _React$useState = React.useState(false);
@@ -555,6 +585,16 @@ window.__ModuleLoader__.load({
 
     // ── 插件入口 ─────────────────────────────────────────
     function apply(ctx) {
+      function CodePanelWithServices(props) {
+        return React.createElement(CodePanel, Object.assign({}, props, {
+          // rc2 通过 ctx.sidebarRight.mounted 暴露“当前屏幕上的会话”；
+          // rc6 没有该服务，返回 undefined，CodePanel 会回退到 useSessions.current。
+          getSidebarRight: function () {
+            return typeof ctx.get === "function" ? ctx.get("sidebarRight") : undefined;
+          },
+        }));
+      }
+
       ctx.effect(function () {
         return ctx.slots.register(
           {
@@ -563,7 +603,7 @@ window.__ModuleLoader__.load({
             order: 100,
             label: "代码面板",
           },
-          CodePanel
+          CodePanelWithServices
         );
       }, "deepseek-code-panel: overlay registration");
     }
